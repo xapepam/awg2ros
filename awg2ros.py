@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""
+awg2ros.py — генератор команд RouterOS для смены VPN-локации awg-proxy.
+Исправлено: обращение к переменным контейнера через key= вместо name=.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from dataclasses import dataclass, field
+from ipaddress import ip_address, ip_network
+
+B64_KEY = re.compile(r"[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=")
+
+OBF_MAP: dict[str, str] = {
+    "jc": "AWG_JC",
+    "jmin": "AWG_JMIN",
+    "jmax": "AWG_JMAX",
+    "s1": "AWG_S1",
+    "s2": "AWG_S2",
+    "h1": "AWG_H1",
+    "h2": "AWG_H2",
+    "h3": "AWG_H3",
+    "h4": "AWG_H4",
+}
+
+
+@dataclass
+class Conf:
+    private_key: str = ""
+    address: str = ""
+    mtu: int | None = None
+    public_key: str = ""
+    endpoint_host: str = ""
+    endpoint_port: int | None = None
+    keepalive: int | None = None
+    obf: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def endpoint(self) -> str:
+        return f"{self.endpoint_host}:{self.endpoint_port}"
+
+    @property
+    def endpoint_is_ip(self) -> bool:
+        try:
+            ip_address(self.endpoint_host)
+            return True
+        except ValueError:
+            return False
+
+
+def parse_conf(text: str) -> Conf:
+    c = Conf()
+    section: str | None = None
+
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].split(";", 1)[0].strip()
+        if not line:
+            continue
+
+        m = re.fullmatch(r"
+$$
+(\w+)
+$$
+", line)
+        if m:
+            section = m.group(1).lower()
+            continue
+
+        if "=" not in line:
+            continue
+
+        k, v = line.split("=", 1)
+        k, v = k.strip().lower(), v.strip().strip('"').strip("'")
+        if not v:
+            continue
+
+        if k in OBF_MAP:
+            c.obf[k] = v
+            continue
+
+        if section == "interface":
+            if k == "privatekey":
+                c.private_key = v
+            elif k == "address":
+                c.address = v.split(",")[0].strip()
+            elif k == "mtu":
+                c.mtu = int(v)
+        elif section == "peer":
+            if k == "publickey":
+                c.public_key = v
+            elif k == "endpoint":
+                host, _, port = v.rpartition(":")
+                c.endpoint_host = host.strip("[]")
+                c.endpoint_port = int(port)
+            elif k == "persistentkeepalive":
+                c.keepalive = int(v)
+
+    return c
+
+
+def generate(c: Conf, a: argparse.Namespace) -> list[str]:
+    out: list[str] = []
+    p = out.append
+
+    tag = a.tag
+    iface = a.iface
+    env = a.envlist
+    cont = a.container
+
+    p("# ============================================================")
+    p(f"#  Смена локации awg-proxy -> {c.endpoint}")
+    p("# ============================================================")
+    p("")
+    p("# --- 1. Резервная копия ---")
+    p(f"/system/backup/save name={tag}-before-switch")
+    p("")
+    p("# --- 2. Остановка контейнера ---")
+    p(f'/container/stop [find where comment~"{cont}"]')
+    p("")
+    p("# --- 3. WireGuard интерфейс и адрес ---")
+    mtu_part = f" mtu={c.mtu}" if c.mtu else ""
+    p(f'/interface/wireguard/set [find where name="{iface}"] private-key="{c.private_key}"{mtu_part}')
+    if c.address:
+        p(f'/ip/address/remove [find where interface="{iface}"]')
+        p(f'/ip/address/add interface="{iface}" address={c.address}')
+    p("")
+    p("# --- 4. Настройки пира ---")
+    ka_part = f" persistent-keepalive={c.keepalive}s" if c.keepalive else ""
+    p(f'/interface/wireguard/peers/set [find where interface="{iface}"] public-key="{c.public_key}"{ka_part}')
+    p("")
+    p("# --- 5. Переменные контейнера (используется key=) ---")
+    p("{")
+    p(":local setenv do={")
+    p(f'  :local id [/container/envs/find where list="{env}" and key=$1]')
+    p("  :if ([:len $id] > 0) do={")
+    p("    /container/envs/set $id value=$2")
+    p("  } else={")
+    p(f'    /container/envs/add list="{env}" key=$1 value=$2')
+    p("  }")
+    p("}")
+    p(f':local pub [/interface/wireguard/get [find where name="{iface}"] public-key]')
+    p('$setenv "AWG_CLIENT_PUB" $pub')
+    p(f'$setenv "AWG_REMOTE" "{c.endpoint}"')
+    p(f'$setenv "AWG_SERVER_PUB" "{c.public_key}"')
+    for k, name in OBF_MAP.items():
+        if k in c.obf:
+            p(f'$setenv "{name}" "{c.obf[k]}"')
+    p("}")
+    p("")
+    p("# --- 6. Маршрут к Endpoint через WAN (защита от петли) ---")
+    p(f'/ip/route/remove [find where comment~"endpoint"]')
+    if c.endpoint_is_ip:
+        p("{")
+        p(':local gw [/ip/route/get [find where dst-address=0.0.0.0/0 and active and routing-table="main"] gateway]')
+        p(f'/ip/route/add dst-address={c.endpoint_host}/32 gateway=$gw distance=1 comment="{tag}-endpoint"')
+        p("}")
+    p("")
+    p("# --- 7. Запуск контейнера и сброс соединений ---")
+    p(f'/container/start [find where comment~"{cont}"]')
+    p("/ip/dns/cache/flush")
+    p("/ip/firewall/connection/remove [find]")
+    p("")
+    p("# --- 8. Проверка через 10 секунд ---")
+    p(f'/interface/wireguard/peers/print detail where interface="{iface}"')
+
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="AmneziaWG .conf -> команды RouterOS")
+    ap.add_argument("conf", help="путь к .conf файлу")
+    ap.add_argument("--tag", default="awg-proxy-1")
+    ap.add_argument("--iface", default="wg-awg-proxy-1")
+    ap.add_argument("--container", default="awg-proxy-1")
+    ap.add_argument("--envlist", default="awg-proxy-1-env")
+    ap.add_argument("-o", "--output", default="switch.rsc")
+    args = ap.parse_args()
+
+    with open(args.conf, encoding="utf-8") as f:
+        cfg = parse_conf(f.read())
+
+    commands = "\n".join(generate(cfg, args)) + "\n"
+
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write(commands)
+
+    print(f"Готово! Скрипт записан в {args.output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
