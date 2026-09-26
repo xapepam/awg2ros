@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """
 awg2ros.py — генератор команд RouterOS для смены VPN-локации awg-proxy.
-Исправлено: обращение к переменным контейнера через key= вместо name=.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from dataclasses import dataclass, field
-from ipaddress import ip_address, ip_network
+from ipaddress import ip_address
 
-B64_KEY = re.compile(r"[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=")
-
-OBF_MAP: dict[str, str] = {
+OBF_MAP = {
     "jc": "AWG_JC",
     "jmin": "AWG_JMIN",
     "jmax": "AWG_JMAX",
@@ -44,6 +40,8 @@ class Conf:
 
     @property
     def endpoint_is_ip(self) -> bool:
+        if not self.endpoint_host:
+            return False
         try:
             ip_address(self.endpoint_host)
             return True
@@ -53,27 +51,23 @@ class Conf:
 
 def parse_conf(text: str) -> Conf:
     c = Conf()
-    section: str | None = None
+    section = None
 
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].split(";", 1)[0].strip()
         if not line:
             continue
 
-        m = re.fullmatch(r"
-$$
-(\w+)
-$$
-", line)
-        if m:
-            section = m.group(1).lower()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
             continue
 
         if "=" not in line:
             continue
 
         k, v = line.split("=", 1)
-        k, v = k.strip().lower(), v.strip().strip('"').strip("'")
+        k = k.strip().lower()
+        v = v.strip(" \t\r\n\"'")
         if not v:
             continue
 
@@ -87,22 +81,31 @@ $$
             elif k == "address":
                 c.address = v.split(",")[0].strip()
             elif k == "mtu":
-                c.mtu = int(v)
+                try:
+                    c.mtu = int(v)
+                except ValueError:
+                    pass
         elif section == "peer":
             if k == "publickey":
                 c.public_key = v
             elif k == "endpoint":
                 host, _, port = v.rpartition(":")
                 c.endpoint_host = host.strip("[]")
-                c.endpoint_port = int(port)
+                try:
+                    c.endpoint_port = int(port)
+                except ValueError:
+                    pass
             elif k == "persistentkeepalive":
-                c.keepalive = int(v)
+                try:
+                    c.keepalive = int(v)
+                except ValueError:
+                    pass
 
     return c
 
 
 def generate(c: Conf, a: argparse.Namespace) -> list[str]:
-    out: list[str] = []
+    out = []
     p = out.append
 
     tag = a.tag
@@ -110,7 +113,7 @@ def generate(c: Conf, a: argparse.Namespace) -> list[str]:
     env = a.envlist
     cont = a.container
 
-    p("# ============================================================")
+    p("# ===========================================")
     p(f"#  Смена локации awg-proxy -> {c.endpoint}")
     p("# ============================================================")
     p("")
@@ -151,7 +154,7 @@ def generate(c: Conf, a: argparse.Namespace) -> list[str]:
     p("}")
     p("")
     p("# --- 6. Маршрут к Endpoint через WAN (защита от петли) ---")
-    p(f'/ip/route/remove [find where comment~"endpoint"]')
+    p('/ip/route/remove [find where comment~"endpoint"]')
     if c.endpoint_is_ip:
         p("{")
         p(':local gw [/ip/route/get [find where dst-address=0.0.0.0/0 and active and routing-table="main"] gateway]')
@@ -179,8 +182,22 @@ def main() -> int:
     ap.add_argument("-o", "--output", default="switch.rsc")
     args = ap.parse_args()
 
-    with open(args.conf, encoding="utf-8") as f:
-        cfg = parse_conf(f.read())
+    try:
+        with open(args.conf, encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Ошибка: файл {args.conf} не найден", file=sys.stderr)
+        return 1
+
+    if not content.strip():
+        print(f"Ошибка: файл {args.conf} пуст", file=sys.stderr)
+        return 1
+
+    cfg = parse_conf(content)
+
+    if not cfg.private_key or not cfg.endpoint_host:
+        print("Ошибка: в конфиге не найдены обязательные параметры (PrivateKey / Endpoint)", file=sys.stderr)
+        return 1
 
     commands = "\n".join(generate(cfg, args)) + "\n"
 
