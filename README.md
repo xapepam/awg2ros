@@ -5,4 +5,6 @@
    ```bash
    python3 awg2ros.py server.conf
    ```
+   ++ если запустить вот так `python3 awg2ros.py` - то будет GUI.
+
 3. На выходе получается готовый файл `switch.rsc`, команды из которого можно сразу вставлять в терминал RouterOS.
