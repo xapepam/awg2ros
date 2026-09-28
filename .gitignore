@@ -1,21 +1,25 @@
-# WireGuard / AmneziaWG configs (содержат ключи)
+# WireGuard / AmneziaWG конфиги и любые их копии/бэкапы
 *.conf
+*.conf*
 
-# Сгенерированные скрипты RouterOS
+# Сгенерированные скрипты RouterOS и их ротации (switch.rsc, switch_1.rsc и т.д.)
 *.rsc
+*.rsc*
+
+# Файл проверки и все его копии (check-command.txt, check-command_1.txt и т.д.)
+check-command*
 
 # Бэкапы и дампы RouterOS
 *.backup
 
-# Python кэш и окружение
+# Python кэш и виртуальные окружения
 __pycache__/
 *.py[cod]
 *$py.class
 .venv/
-venv/
 env/
 
-# IDE и редакторы
+# IDE и временные файлы редакторов
 .idea/
 .vscode/
 *.swp
