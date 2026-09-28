@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 awg2ros.py — генератор команд RouterOS для смены VPN-локации awg-proxy.
+Автоматически ротирует старые файлы перед записью (name_1, name_2, ...).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass, field
 from ipaddress import ip_address
@@ -172,6 +174,30 @@ def generate(c: Conf, a: argparse.Namespace) -> list[str]:
     return out
 
 
+def rotate_file(filepath: str) -> str | None:
+    """
+    Если filepath существует, переименовывает его в имя с инкрементом (_1, _2...).
+    Возвращает новое имя файла.
+    """
+    if not os.path.exists(filepath):
+        return None
+
+    base, ext = os.path.splitext(filepath)
+    counter = 1
+    while True:
+        candidate = f"{base}_{counter}{ext}"
+        if not os.path.exists(candidate):
+            break
+        counter += 1
+
+    try:
+        os.rename(filepath, candidate)
+        return candidate
+    except OSError as e:
+        print(f"Предупреждение: не удалось переместить старый {filepath} в {candidate}: {e}", file=sys.stderr)
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="AmneziaWG .conf -> команды RouterOS")
     ap.add_argument("conf", help="путь к .conf файлу")
@@ -201,10 +227,19 @@ def main() -> int:
 
     commands = "\n".join(generate(cfg, args)) + "\n"
 
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(commands)
+    # Ротируем предыдущий файл, если он уже есть
+    archived = rotate_file(args.output)
+    if archived:
+        print(f"Предыдущий файл сохранён как: {archived}")
 
-    print(f"Готово! Скрипт записан в {args.output}")
+    try:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(commands)
+    except OSError as e:
+        print(f"Ошибка записи в файл {args.output}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Готово! Новый скрипт записан в: {args.output}")
     return 0
 
 
