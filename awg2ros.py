@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 awg2ros.py — генератор команд RouterOS для смены VPN-локации awg-proxy.
-Современный плоский тёмный GUI + CLI режим.
+Генерирует основной конфигурационный скрипт (.rsc) и скрипт диагностики (check-command.txt).
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def parse_conf(text: str) -> Conf:
     return c
 
 
-def generate(c: Conf, tag: str, iface: str, env: str, cont: str, make_backup: bool = True) -> list[str]:
+def generate_main(c: Conf, tag: str, iface: str, env: str, cont: str, make_backup: bool = True) -> list[str]:
     out = []
     p = out.append
 
@@ -173,6 +173,33 @@ def generate(c: Conf, tag: str, iface: str, env: str, cont: str, make_backup: bo
     return out
 
 
+def generate_check(tag: str, iface: str, env: str, cont: str) -> str:
+    lines = [
+        "{",
+        ':put "=== 1. WG INTERFACE & PEER ==="',
+        f'/interface/wireguard/print detail where name="{iface}"',
+        f'/interface/wireguard/peers/print detail where interface="{iface}"',
+        "",
+        ':put "=== 2. CONTAINER STATUS ==="',
+        f'/container/print detail where comment~"{cont}"',
+        "",
+        ':put "=== 3. KEY MATCH CHECK ==="',
+        f':local ifPub [/interface/wireguard/get [find where name="{iface}"] public-key]',
+        f':local envPub [/container/envs/get [find where list="{env}" and key="AWG_CLIENT_PUB"] value]',
+        ':put ("Interface Pub: " . $ifPub)',
+        ':put ("Container Pub: " . $envPub)',
+        ':if ($ifPub = $envPub) do={ :put "KEYS: MATCH (OK)" } else={ :put "KEYS: MISMATCH (ОШИБКА!)" }',
+        "",
+        ':put "=== 4. ENDPOINT ROUTE ==="',
+        '/ip/route/print where comment~"endpoint"',
+        "",
+        ':put "=== 5. ROUTES IN TABLE ==="',
+        f'/ip/route/print where routing-table="WG" or routing-table="{tag}-fwd-table"',
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def rotate_file(filepath: str) -> str | None:
     if not os.path.exists(filepath):
         return None
@@ -201,19 +228,18 @@ def run_gui():
     import tkinter as tk
     from tkinter import filedialog, messagebox
 
-    # Цветовая палитра (Catppuccin Mocha / JetBrains Dark)
-    C_BG = "#181825"         # Основной фон окна
-    C_PANEL = "#1e1e2e"      # Фон панелей и карточек
-    C_INPUT = "#11111b"      # Фон текстовых редакторов и полей
-    C_BORDER = "#313244"     # Границы и разделители
-    C_TEXT = "#cdd6f4"       # Основной текст
-    C_MUTED = "#9399b2"      # Вторичный текст / плейсхолдеры
-    C_ACCENT = "#89b4fa"     # Основной акцент (Soft Blue)
-    C_ACCENT_HOV = "#b4befe" # Ховер акцента
-    C_SUCCESS = "#a6e3a1"    # Зелёный статус
-    C_DANGER = "#f38ba8"     # Красный статус / ошибки
-    C_BTN_SEC = "#313244"    # Вторичные кнопки
-    C_BTN_SEC_HOV = "#45475a"# Ховер вторичных кнопок
+    C_BG = "#181825"
+    C_PANEL = "#1e1e2e"
+    C_INPUT = "#11111b"
+    C_BORDER = "#313244"
+    C_TEXT = "#cdd6f4"
+    C_MUTED = "#9399b2"
+    C_ACCENT = "#89b4fa"
+    C_ACCENT_HOV = "#b4befe"
+    C_SUCCESS = "#a6e3a1"
+    C_DANGER = "#f38ba8"
+    C_BTN_SEC = "#313244"
+    C_BTN_SEC_HOV = "#45475a"
 
     FONT_UI = ("Noto Sans", 10)
     FONT_UI_BOLD = ("Noto Sans", 10, "bold")
@@ -227,11 +253,10 @@ def run_gui():
 
     root = tk.Tk()
     root.title("awg2ros — AmneziaWG to RouterOS Generator")
-    root.geometry("1060x750")
+    root.geometry("1080x760")
     root.minsize(860, 600)
     root.configure(bg=C_BG)
 
-    # Хелпер для создания плоских кнопок с hover-эффектом
     def create_btn(parent, text, cmd, primary=False, bg=None, fg=None, hov=None):
         btn_bg = bg or (C_ACCENT if primary else C_BTN_SEC)
         btn_fg = fg or ("#11111b" if primary else C_TEXT)
@@ -247,23 +272,15 @@ def run_gui():
             activebackground=btn_hov,
             activeforeground=btn_fg,
             bd=0,
-            padx=14,
+            padx=12,
             pady=6,
             cursor="hand2",
             relief=tk.FLAT,
         )
-
-        def on_enter(e):
-            btn.configure(bg=btn_hov)
-
-        def on_leave(e):
-            btn.configure(bg=btn_bg)
-
-        btn.bind("<Enter>", on_enter)
-        btn.bind("<Leave>", on_leave)
+        btn.bind("<Enter>", lambda e: btn.configure(bg=btn_hov))
+        btn.bind("<Leave>", lambda e: btn.configure(bg=btn_bg))
         return btn
 
-    # Хелпер для стилизации Scrollbar
     def make_scroll_text(parent):
         frame = tk.Frame(parent, bg=C_BORDER, bd=1)
         txt = tk.Text(
@@ -292,7 +309,7 @@ def run_gui():
 
     t_title = tk.Label(hdr, text="awg2ros", font=FONT_TITLE, fg=C_ACCENT, bg=C_PANEL)
     t_title.pack(side=tk.LEFT)
-    t_sub = tk.Label(hdr, text="• Смена локации AmneziaWG для RouterOS", font=FONT_UI, fg=C_MUTED, bg=C_PANEL)
+    t_sub = tk.Label(hdr, text="• Смена локации AmneziaWG + генератор проверки", font=FONT_UI, fg=C_MUTED, bg=C_PANEL)
     t_sub.pack(side=tk.LEFT, padx=10)
 
     # --- Top File Bar ---
@@ -342,6 +359,7 @@ def run_gui():
     cont_var = tk.StringVar(value="awg-proxy-1")
     env_var = tk.StringVar(value="awg-proxy-1-env")
     out_var = tk.StringVar(value="switch.rsc")
+    check_var = tk.StringVar(value="check-command.txt")
     backup_var = tk.BooleanVar(value=True)
 
     fields = [
@@ -350,11 +368,12 @@ def run_gui():
         ("Контейнер:", cont_var, 12),
         ("Envlist:", env_var, 13),
         ("Выходной .rsc:", out_var, 11),
+        ("Файл проверки:", check_var, 14),
     ]
 
     for col, (label_t, v, w) in enumerate(fields):
         col_frame = tk.Frame(opt_card, bg=C_PANEL)
-        col_frame.grid(row=0, column=col, padx=6, sticky="w")
+        col_frame.grid(row=0, column=col, padx=5, sticky="w")
         tk.Label(col_frame, text=label_t, font=FONT_UI, fg=C_MUTED, bg=C_PANEL).pack(anchor="w")
 
         e_wrap = tk.Frame(col_frame, bg=C_BORDER, bd=1)
@@ -362,9 +381,8 @@ def run_gui():
         e = tk.Entry(e_wrap, textvariable=v, width=w, bg=C_INPUT, fg=C_TEXT, insertbackground=C_TEXT, font=FONT_UI, bd=0)
         e.pack(ipady=4, padx=6)
 
-    # Чекбокс бэкапа
     cb_frame = tk.Frame(opt_card, bg=C_PANEL)
-    cb_frame.grid(row=0, column=len(fields), padx=(10, 0), sticky="e")
+    cb_frame.grid(row=0, column=len(fields), padx=(8, 0), sticky="e")
     tk.Label(cb_frame, text="Опции:", font=FONT_UI, fg=C_MUTED, bg=C_PANEL).pack(anchor="w")
 
     cb_backup = tk.Checkbutton(
@@ -383,7 +401,7 @@ def run_gui():
     )
     cb_backup.pack(anchor="w", pady=(4, 0))
 
-    # --- Work Area (Left: Input / Right: Output) ---
+    # --- Work Area ---
     work_area = tk.Frame(root, bg=C_BG, padx=16)
     work_area.pack(fill=tk.BOTH, expand=True)
 
@@ -391,18 +409,52 @@ def run_gui():
     work_area.columnconfigure(1, weight=1, uniform="group1")
     work_area.rowconfigure(1, weight=1)
 
-    # Заголовки редакторов
+    # Заголовок слева
     lbl_left = tk.Label(work_area, text="Конфигурация источника (.conf)", font=FONT_UI_BOLD, fg=C_TEXT, bg=C_BG)
     lbl_left.grid(row=0, column=0, sticky="w", pady=(0, 4))
 
-    lbl_right = tk.Label(work_area, text="Команды RouterOS (.rsc)", font=FONT_UI_BOLD, fg=C_TEXT, bg=C_BG)
-    lbl_right.grid(row=0, column=1, sticky="w", pady=(0, 4), padx=(8, 0))
+    # Переключатель вкладок справа
+    right_tab_bar = tk.Frame(work_area, bg=C_BG)
+    right_tab_bar.grid(row=0, column=1, sticky="w", pady=(0, 4), padx=(4, 0))
+
+    current_tab = "main"
 
     f_left, in_text = make_scroll_text(work_area)
     f_left.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
 
-    f_right, out_text = make_scroll_text(work_area)
-    f_right.grid(row=1, column=1, sticky="nsew", padx=(4, 0))
+    # Правые контейнеры (switch.rsc и check-command.txt)
+    f_right_main, out_text_main = make_scroll_text(work_area)
+    f_right_check, out_text_check = make_scroll_text(work_area)
+
+    f_right_main.grid(row=1, column=1, sticky="nsew", padx=(4, 0))
+    f_right_check.grid(row=1, column=1, sticky="nsew", padx=(4, 0))
+    f_right_main.tkraise()
+
+    def show_tab(tab_name):
+        nonlocal current_tab
+        current_tab = tab_name
+        if tab_name == "main":
+            f_right_main.tkraise()
+            btn_tab_main.configure(bg=C_ACCENT, fg="#11111b")
+            btn_tab_check.configure(bg=C_BTN_SEC, fg=C_TEXT)
+        else:
+            f_right_check.tkraise()
+            btn_tab_check.configure(bg=C_ACCENT, fg="#11111b")
+            btn_tab_main.configure(bg=C_BTN_SEC, fg=C_TEXT)
+
+    btn_tab_main = tk.Button(
+        right_tab_bar, text=" 📄 switch.rsc ", font=FONT_UI_BOLD,
+        bg=C_ACCENT, fg="#11111b", bd=0, padx=8, pady=2, cursor="hand2", relief=tk.FLAT,
+        command=lambda: show_tab("main")
+    )
+    btn_tab_main.pack(side=tk.LEFT, padx=(0, 4))
+
+    btn_tab_check = tk.Button(
+        right_tab_bar, text=" 🩺 check-command.txt ", font=FONT_UI,
+        bg=C_BTN_SEC, fg=C_TEXT, bd=0, padx=8, pady=2, cursor="hand2", relief=tk.FLAT,
+        command=lambda: show_tab("check")
+    )
+    btn_tab_check.pack(side=tk.LEFT)
 
     # --- Bottom Actions Bar ---
     bot_bar = tk.Frame(root, bg=C_PANEL, padx=16, pady=10)
@@ -422,68 +474,95 @@ def run_gui():
         raw = in_text.get("1.0", tk.END).strip()
         if not raw:
             set_status("Ошибка: вставьте текст конфигурации или выберите файл", C_DANGER)
-            return None
+            return None, None
 
         cfg = parse_conf(raw)
         if not cfg.private_key or not cfg.endpoint_host:
             set_status("Ошибка: в конфиге нет PrivateKey или Endpoint", C_DANGER)
-            return None
+            return None, None
 
-        commands = "\n".join(generate(
-            cfg,
-            tag=tag_var.get().strip(),
-            iface=iface_var.get().strip(),
-            env=env_var.get().strip(),
-            cont=cont_var.get().strip(),
-            make_backup=backup_var.get(),
+        tag = tag_var.get().strip()
+        iface = iface_var.get().strip()
+        env = env_var.get().strip()
+        cont = cont_var.get().strip()
+
+        commands_main = "\n".join(generate_main(
+            cfg, tag=tag, iface=iface, env=env, cont=cont, make_backup=backup_var.get(),
         )) + "\n"
 
-        out_text.delete("1.0", tk.END)
-        out_text.insert(tk.END, commands)
-        set_status(f"Сгенерировано успешно: {cfg.endpoint}", C_SUCCESS)
-        return commands
+        commands_check = generate_check(tag=tag, iface=iface, env=env, cont=cont)
 
-    def do_copy():
-        res = out_text.get("1.0", tk.END).strip()
+        out_text_main.delete("1.0", tk.END)
+        out_text_main.insert(tk.END, commands_main)
+
+        out_text_check.delete("1.0", tk.END)
+        out_text_check.insert(tk.END, commands_check)
+
+        set_status(f"Сгенерировано: switch.rsc и check-command.txt ({cfg.endpoint})", C_SUCCESS)
+        return commands_main, commands_check
+
+    def do_copy_main():
+        res = out_text_main.get("1.0", tk.END).strip()
         if not res:
-            res = do_generate()
+            res, _ = do_generate()
         if res:
             root.clipboard_clear()
-            root.clipboard_append(out_text.get("1.0", tk.END))
-            set_status("Команды скопированы в буфер обмена!", C_SUCCESS)
+            root.clipboard_append(out_text_main.get("1.0", tk.END))
+            set_status("Команды switch.rsc скопированы в буфер!", C_SUCCESS)
+
+    def do_copy_check():
+        res = out_text_check.get("1.0", tk.END).strip()
+        if not res:
+            _, res = do_generate()
+        if res:
+            root.clipboard_clear()
+            root.clipboard_append(out_text_check.get("1.0", tk.END))
+            set_status("Команда проверки скопирована в буфер!", C_SUCCESS)
 
     def do_save():
-        res = out_text.get("1.0", tk.END).strip()
-        if not res:
-            res = do_generate()
-        if not res:
+        main_text = out_text_main.get("1.0", tk.END).strip()
+        check_text = out_text_check.get("1.0", tk.END).strip()
+        if not main_text or not check_text:
+            main_text, check_text = do_generate()
+        if not main_text:
             return
 
-        target_file = out_var.get().strip() or "switch.rsc"
-        archived = rotate_file(target_file)
+        target_main = out_var.get().strip() or "switch.rsc"
+        target_check = check_var.get().strip() or "check-command.txt"
+
+        arch_main = rotate_file(target_main)
+        arch_check = rotate_file(target_check)
+
         try:
-            with open(target_file, "w", encoding="utf-8") as f:
-                f.write(out_text.get("1.0", tk.END))
-            msg = f"Сохранено в {target_file}"
-            if archived:
-                msg += f" (старый перемещён в {archived})"
+            with open(target_main, "w", encoding="utf-8") as f:
+                f.write(out_text_main.get("1.0", tk.END))
+            with open(target_check, "w", encoding="utf-8") as f:
+                f.write(out_text_check.get("1.0", tk.END))
+
+            msg = f"Сохранено: {target_main} и {target_check}"
+            if arch_main or arch_check:
+                msg += " (предыдущие ротированы)"
             set_status(msg, C_SUCCESS)
         except Exception as e:
             set_status(f"Ошибка сохранения: {e}", C_DANGER)
-            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить файлы:\n{e}")
 
     def do_clear():
         in_text.delete("1.0", tk.END)
-        out_text.delete("1.0", tk.END)
+        out_text_main.delete("1.0", tk.END)
+        out_text_check.delete("1.0", tk.END)
         path_var.set("")
         set_status("Очищено", C_MUTED)
 
     # Кнопки справа в футере
-    btn_save = create_btn(bot_bar, "Сохранить файл", do_save)
+    btn_save = create_btn(bot_bar, "Сохранить файлы", do_save)
     btn_save.pack(side=tk.RIGHT, padx=(6, 0))
 
-    btn_copy = create_btn(bot_bar, "Скопировать команды", do_copy)
-    btn_copy.pack(side=tk.RIGHT, padx=(6, 0))
+    btn_copy_check = create_btn(bot_bar, "Скопировать проверку", do_copy_check)
+    btn_copy_check.pack(side=tk.RIGHT, padx=(6, 0))
+
+    btn_copy_main = create_btn(bot_bar, "Скопировать .rsc", do_copy_main)
+    btn_copy_main.pack(side=tk.RIGHT, padx=(6, 0))
 
     btn_gen = create_btn(bot_bar, "Сгенерировать", do_generate, primary=True)
     btn_gen.pack(side=tk.RIGHT, padx=(6, 0))
@@ -491,7 +570,6 @@ def run_gui():
     btn_clear = create_btn(bot_bar, "Очистить", do_clear)
     btn_clear.pack(side=tk.RIGHT, padx=(6, 0))
 
-    # Горячие клавиши
     root.bind("<Control-Return>", lambda e: do_generate())
 
     root.mainloop()
@@ -510,6 +588,8 @@ def run_cli():
     ap.add_argument("--container", default="awg-proxy-1")
     ap.add_argument("--envlist", default="awg-proxy-1-env")
     ap.add_argument("-o", "--output", default="switch.rsc")
+    ap.add_argument("--check-output", default="check-command.txt",
+                    help="имя файла с командой проверки (по умолчанию: check-command.txt)")
     ap.add_argument("--no-backup", dest="make_backup", action="store_false", default=True,
                     help="не добавлять команду создания бэкапа перед сменой")
     args = ap.parse_args()
@@ -534,7 +614,7 @@ def run_cli():
         print("Ошибка: в конфиге не найдены обязательные параметры (PrivateKey / Endpoint)", file=sys.stderr)
         return 1
 
-    commands = "\n".join(generate(
+    commands_main = "\n".join(generate_main(
         cfg,
         tag=args.tag,
         iface=args.iface,
@@ -543,18 +623,32 @@ def run_cli():
         make_backup=args.make_backup,
     )) + "\n"
 
-    archived = rotate_file(args.output)
-    if archived:
-        print(f"Предыдущий файл сохранён как: {archived}")
+    commands_check = generate_check(
+        tag=args.tag,
+        iface=args.iface,
+        env=args.envlist,
+        cont=args.container,
+    )
+
+    # Ротация обоих файлов
+    arch_main = rotate_file(args.output)
+    arch_check = rotate_file(args.check_output)
+
+    if arch_main:
+        print(f"Предыдущий .rsc сохранён как: {arch_main}")
+    if arch_check:
+        print(f"Предыдущая проверка сохранена как: {arch_check}")
 
     try:
         with open(args.output, "w", encoding="utf-8") as f:
-            f.write(commands)
+            f.write(commands_main)
+        with open(args.check_output, "w", encoding="utf-8") as f:
+            f.write(commands_check)
     except OSError as e:
-        print(f"Ошибка записи в файл {args.output}: {e}", file=sys.stderr)
+        print(f"Ошибка записи файлов: {e}", file=sys.stderr)
         return 1
 
-    print(f"Готово! Новый скрипт записан в: {args.output}")
+    print(f"Готово! Записано:\n  • {args.output}\n  • {args.check_output}")
     return 0
 
 
